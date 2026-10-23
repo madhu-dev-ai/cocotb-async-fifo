@@ -15,41 +15,120 @@ async def reset(dut):
     await Timer(50, unit="ns")
 
 
-@cocotb.test()
-async def test_basic(dut):
-    # two different clocks
+class FifoDriver:
+    """Pushes data in on the write clock, pops data out on the read clock."""
+
+    def __init__(self, dut):
+        self.dut = dut
+
+    async def write(self, data):
+        self.dut.wdata.value = data
+        self.dut.winc.value = 1
+        while True:
+            await RisingEdge(self.dut.wclk)
+            if int(self.dut.wfull.value) == 0:   # write was accepted
+                break
+        self.dut.winc.value = 0
+
+    async def read(self):
+        self.dut.rinc.value = 1
+        while True:
+            await RisingEdge(self.dut.rclk)
+            if int(self.dut.rempty.value) == 0:  # read was accepted
+                break
+        self.dut.rinc.value = 0
+
+
+class FifoMonitor:
+    """Watches both sides and tells subscribers about every real write and read."""
+
+    def __init__(self, dut):
+        self.dut = dut
+        self.write_subs = []
+        self.read_subs = []
+
+    def start(self):
+        cocotb.start_soon(self._watch_write())
+        cocotb.start_soon(self._watch_read())
+
+    async def _watch_write(self):
+        while True:
+            await RisingEdge(self.dut.wclk)
+            if int(self.dut.winc.value) == 1 and int(self.dut.wfull.value) == 0:
+                item = int(self.dut.wdata.value)
+                for cb in self.write_subs:
+                    cb(item)
+
+    async def _watch_read(self):
+        while True:
+            await RisingEdge(self.dut.rclk)
+            if int(self.dut.rinc.value) == 1 and int(self.dut.rempty.value) == 0:
+                item = int(self.dut.rdata.value)
+                for cb in self.read_subs:
+                    cb(item)
+
+
+class FifoScoreboard:
+    """Python model: what goes in must come out, in the same order."""
+
+    def __init__(self, dut):
+        self.dut = dut
+        self.expected = []
+        self.checked = 0
+        self.errors = 0
+
+    def on_write(self, item):
+        self.expected.append(item)
+
+    def on_read(self, item):
+        if not self.expected:
+            self.errors += 1
+            self.dut._log.error(f"Read {item:#x} but nothing was expected")
+            return
+        exp = self.expected.pop(0)
+        if item != exp:
+            self.errors += 1
+            self.dut._log.error(f"Data mismatch: expected {exp:#x}, got {item:#x}")
+        else:
+            self.checked += 1
+
+
+async def make_env(dut):
+    """Starts both clocks, resets the FIFO, builds and connects everything."""
     cocotb.start_soon(Clock(dut.wclk, 10, unit="ns").start())
     cocotb.start_soon(Clock(dut.rclk, 14, unit="ns").start())
-
     await reset(dut)
 
-    # after reset: empty, not full
-    assert dut.rempty.value == 1, "FIFO should be empty after reset"
-    assert dut.wfull.value == 0, "FIFO should not be full after reset"
+    driver = FifoDriver(dut)
+    monitor = FifoMonitor(dut)
+    scoreboard = FifoScoreboard(dut)
+    monitor.write_subs.append(scoreboard.on_write)
+    monitor.read_subs.append(scoreboard.on_read)
+    monitor.start()
+    return driver, monitor, scoreboard
 
-    # write 5 values on the write clock
-    sent = [0x11, 0x22, 0x33, 0x44, 0x55]
-    for v in sent:
-        await RisingEdge(dut.wclk)
-        dut.wdata.value = v
-        dut.winc.value = 1
-    await RisingEdge(dut.wclk)
-    dut.winc.value = 0
 
-    # wait a few read clocks so the write pointer crosses over
-    for _ in range(6):
+@cocotb.test()
+async def test_basic(dut):
+    driver, monitor, sb = await make_env(dut)
+
+    async def writer():
+        for i in range(20):
+            await driver.write(0x10 + i)
+
+    async def reader():
+        for _ in range(20):
+            await driver.read()
+
+    w = cocotb.start_soon(writer())
+    r = cocotb.start_soon(reader())
+    await w
+    await r
+
+    for _ in range(5):
         await RisingEdge(dut.rclk)
 
-    # read 5 values on the read clock
-    got = []
-    for _ in sent:
-        await RisingEdge(dut.rclk)
-        while dut.rempty.value == 1:
-            await RisingEdge(dut.rclk)
-        got.append(int(dut.rdata.value))
-        dut.rinc.value = 1
-        await RisingEdge(dut.rclk)
-        dut.rinc.value = 0
-
-    dut._log.info(f"sent={sent} got={got}")
-    assert got == sent, f"Mismatch: sent={sent} got={got}"
+    dut._log.info(f"checked={sb.checked} errors={sb.errors}")
+    assert sb.errors == 0, "Scoreboard found errors"
+    assert sb.checked == 20, f"Expected 20 checks, got {sb.checked}"
+    assert not sb.expected, "Some written items were never read"

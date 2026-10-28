@@ -193,7 +193,7 @@ async def make_env(dut):
     return driver, monitor, scoreboard, coverage
 
 
-@cocotb.test()
+@cocotb.test(timeout_time=200, timeout_unit="us")
 async def test_basic(dut):
     driver, monitor, sb, cov = await make_env(dut)
 
@@ -220,7 +220,7 @@ async def test_basic(dut):
     assert not sb.expected, "Some written items were never read"
 
 
-@cocotb.test()
+@cocotb.test(timeout_time=200, timeout_unit="us")
 async def test_random(dut):
     """300 random items. Phases swap between 'writer fast' and 'reader fast',
     so the FIFO fills up, empties, and wraps around many times."""

@@ -1,5 +1,7 @@
 \# cocotb-async-fifo
 
+![test](https://github.com/madhu-dev-ai/cocotb-async-fifo/actions/workflows/test.yml/badge.svg)
+
 
 
 Verification of an asynchronous FIFO (write clock and read clock are different) using a UVM-style layered testbench written in cocotb (Python) with Icarus Verilog.
